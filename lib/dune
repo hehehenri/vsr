@@ -1,0 +1,4 @@
+(library
+ (name lib)
+ (public_name vsr.lib)
+ (modules replica types message network))
