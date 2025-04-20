@@ -86,6 +86,8 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     let primary_id = get_primary_id replica in
     primary_id = replica.id
 
+  let is_backup replica = not @@ is_primary replica
+
   let quorum (replica : 's replica) =
     let n = List.length replica.config in
     (n / 2) + 1
@@ -143,7 +145,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
 
   let handle_prepare (replica : normal replica)
       (prep : Op.operation Message.prepare) =
-    assert (not @@ is_primary replica);
+    assert (is_backup replica);
     let is_up_to_date = prep.op_number < OpNumber.succ replica.op_number in
 
     if not is_up_to_date then (* TODO: state transfer *)
@@ -200,13 +202,18 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     N.broadcast replica.network commit;
     ()
 
+  let handle_commit (replica : normal replica) (message : Message.commit) =
+    assert (is_backup replica);
+    OpMap.find_opt message.commit_number replica.request_log
+    |> Option.iter (fun op -> ignore @@ Op.execute op)
+
   let handle_normal_message (replica : normal replica)
       (message : Op.operation Message.message) =
     match message with
     | Request req -> handle_request replica req
     | Prepare prep -> handle_prepare replica prep
     | PrepareOk prep_ok -> handle_prepare_ok replica prep_ok
-    | Commit commit -> assert false
+    | Commit commit -> handle_commit replica commit
 
   let handle_view_change_message (replica : view_change replica)
       (message : Op.operation Message.message) =
