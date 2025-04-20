@@ -200,11 +200,27 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     N.broadcast replica.network commit;
     ()
 
-  let handle_message (replica : 's replica)
+  let handle_normal_message (replica : normal replica)
       (message : Op.operation Message.message) =
     match message with
     | Request req -> handle_request replica req
     | Prepare prep -> handle_prepare replica prep
     | PrepareOk prep_ok -> handle_prepare_ok replica prep_ok
-    | _ -> assert false
+    | Commit commit -> assert false
+
+  let handle_view_change_message (replica : view_change replica)
+      (message : Op.operation Message.message) =
+    assert false
+
+  let handle_recovery_message (replica : recovering replica)
+      (message : Op.operation Message.message) =
+    assert false
+
+  let handle_message : type s. s replica -> Op.operation Message.message -> unit
+      =
+   fun replica message ->
+    match replica.state with
+    | Normal -> handle_normal_message replica message
+    | ViewChange -> handle_view_change_message replica message
+    | Recovering -> handle_recovery_message replica message
 end
