@@ -12,7 +12,6 @@ type _ state =
 type config = ReplicaId.t list
 
 module LogMap : Map.S with type key = OpNumber.t
-
 module ClientIdMap : Map.S with type key = ClientId.t
 
 type client_entry = {
@@ -31,18 +30,13 @@ module Make (N : Network.S) : sig
     config : config;
     mutable op_number : OpNumber.t;
     commit_number : OpNumber.t;
-    mutable request_log : 'op Message.request_message LogMap.t;
+    mutable request_log : 'op Message.request LogMap.t;
     mutable client_map : client_map;
     network : 'op N.t;
   }
 
   val init_replica : int -> int list -> (normal, 'op) replica
-
   val get_primary_id : ('s, 'op) replica -> ReplicaId.t
-
   val is_primary : ('s, 'op) replica -> bool
-
-  val handle_request : ('s, 'op) replica -> 'op Message.request_message -> unit
-
   val handle_message : ('s, 'op) replica -> 'op Message.message -> unit
 end

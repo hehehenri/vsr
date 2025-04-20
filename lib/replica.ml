@@ -11,7 +11,7 @@ type _ state =
 
 type config = ReplicaId.t list
 
-module LogMap = Map.Make (struct
+module OpMap = Map.Make (struct
   type t = OpNumber.t
 
   let compare = OpNumber.compare
@@ -31,22 +31,36 @@ type client_entry = {
 
 type client_map = client_entry ClientIdMap.t
 
-module Make (N : Network.S) = struct
-  type ('s, 'op) replica = {
+module ReplicaSet = Set.Make (struct
+  type t = ReplicaId.t
+
+  let compare = ReplicaId.compare
+end)
+
+module type OperationExecutor = sig
+  type operation
+  type result
+
+  val execute : operation -> result
+end
+
+module Make (N : Network.S) (Op : OperationExecutor) = struct
+  type 's replica = {
     id : ReplicaId.t;
     state : 's state;
     view : ViewNumber.t;
     config : config;
     mutable op_number : OpNumber.t;
-    commit_number : OpNumber.t;
-    mutable request_log : 'op Message.request_message LogMap.t;
+    mutable commit_number : OpNumber.t;
+    mutable request_log : Op.operation OpMap.t;
     mutable client_map : client_map;
-    network : 'op N.t;
+    mutable prepare_ok_acks : ReplicaSet.t OpMap.t;
+    network : Op.operation N.t;
   }
 
   let init_replica id config =
     let config = List.map (fun id -> ReplicaId.of_int id) config in
-    let request_log = LogMap.empty in
+    let request_log = OpMap.empty in
     let client_map = ClientIdMap.empty in
     {
       id = ReplicaId.of_int id;
@@ -58,6 +72,7 @@ module Make (N : Network.S) = struct
       request_log;
       client_map;
       network = N.create config;
+      prepare_ok_acks = OpMap.empty;
     }
 
   let get_primary_id replica =
@@ -71,28 +86,51 @@ module Make (N : Network.S) = struct
     let primary_id = get_primary_id replica in
     primary_id = replica.id
 
-  let handle_request (replica:('s, 'op) replica) (request:'op Message.request_message) =
+  let quorum (replica : 's replica) =
+    let n = List.length replica.config in
+    (n / 2) + 1
+
+  let commit (replica : normal replica) (op : OpNumber.t) =
+    match OpMap.find_opt op replica.request_log with
+    | Some op -> Op.execute op
+    | None -> failwith "op not found in log"
+
+  let handle_request (replica : 's replica)
+      (request : Op.operation Message.request) =
     assert (is_primary replica);
 
     let continue () =
-        replica.op_number <- OpNumber.succ replica.op_number;
-        replica.request_log <- LogMap.add replica.op_number request replica.request_log;
-        replica.client_map <- ClientIdMap.update request.client_id (fun _ -> Some ({ client_id = request.client_id; request_number = request.request_number; response = None; })) replica.client_map;
+      replica.op_number <- OpNumber.succ replica.op_number;
+      replica.request_log <-
+        OpMap.add replica.op_number request.op replica.request_log;
+      replica.client_map <-
+        ClientIdMap.update request.client_id
+          (fun _ ->
+            Some
+              {
+                client_id = request.client_id;
+                request_number = request.request_number;
+                response = None;
+              })
+          replica.client_map;
 
-        let prepare = Message.Prepare {
-                view_number = replica.view;
-                op = request.op;
-                op_number = replica.op_number;
-                commit_number = replica.commit_number;
-        } in
-        N.broadcast replica.network prepare
+      let prepare =
+        Message.Prepare
+          {
+            view_number = replica.view;
+            op_number = replica.op_number;
+            commit_number = replica.commit_number;
+            request;
+          }
+      in
+      N.broadcast replica.network prepare
     in
 
     let latest_request =
       ClientIdMap.find_opt request.client_id replica.client_map
     in
     match latest_request with
-    | Some latest_request -> (
+    | Some latest_request ->
         if request.request_number < latest_request.request_number then
           (* NOTE: drop the request *)
           ()
@@ -100,24 +138,73 @@ module Make (N : Network.S) = struct
           (* TODO: reply back to the user with the existing response*)
           (* latest_request.response *)
           ()
-        else continue ())
+        else continue ()
     | None -> continue ()
 
-  let handle_message (replica:('s, 'op) replica) (message : 'op Message.message) =
+  let handle_prepare (replica : normal replica)
+      (prep : Op.operation Message.prepare) =
+    assert (not @@ is_primary replica);
+    let is_up_to_date = prep.op_number < OpNumber.succ replica.op_number in
+
+    if not is_up_to_date then (* TODO: state transfer *)
+      assert false
+    else assert (OpNumber.succ replica.op_number = prep.op_number);
+    replica.op_number <- prep.op_number;
+    replica.request_log <-
+      OpMap.update prep.op_number
+        (fun _ -> Some prep.request.op)
+        replica.request_log;
+    replica.client_map <-
+      ClientIdMap.add prep.request.client_id
+        {
+          client_id = prep.request.client_id;
+          request_number = prep.request.request_number;
+          response = None;
+        }
+        replica.client_map;
+
+    let prepare_ok =
+      Message.PrepareOk
+        {
+          view_number = replica.view;
+          op_number = replica.op_number;
+          replica_id = replica.id;
+        }
+    in
+    let primary_id = get_primary_id replica in
+    N.send replica.network (Single primary_id) prepare_ok
+
+  let handle_prepare_ok (replica : normal replica)
+      (prep_ok : Message.prepare_ok) =
+    assert (is_primary replica);
+    let acks =
+      match OpMap.find_opt prep_ok.op_number replica.prepare_ok_acks with
+      | Some x -> x
+      | None -> ReplicaSet.empty
+    in
+
+    let acks = ReplicaSet.add prep_ok.replica_id acks in
+    replica.prepare_ok_acks <-
+      OpMap.add replica.op_number acks replica.prepare_ok_acks;
+
+    let total_acks = ReplicaSet.cardinal acks in
+    if total_acks = quorum replica then
+      replica.commit_number <- prep_ok.op_number;
+    let result = commit replica prep_ok.op_number in
+
+    (* TODO: reply back to the user *)
+    let commit =
+      Message.Commit
+        { view_number = replica.view; commit_number = prep_ok.op_number }
+    in
+    N.broadcast replica.network commit;
+    ()
+
+  let handle_message (replica : 's replica)
+      (message : Op.operation Message.message) =
     match message with
     | Request req -> handle_request replica req
+    | Prepare prep -> handle_prepare replica prep
+    | PrepareOk prep_ok -> handle_prepare_ok replica prep_ok
     | _ -> assert false
-
-
-  let get_primary_id replica =
-    let view_number = ViewNumber.to_int replica.view in
-    let length = List.length replica.config in
-    assert (length <> 0);
-    let primary_index = view_number mod length in
-    List.nth replica.config primary_index
-
-  let is_primary replica =
-    let primary_id = get_primary_id replica in
-    primary_id = replica.id
-
 end
