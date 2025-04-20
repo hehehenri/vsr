@@ -38,3 +38,17 @@ module ViewNumber : sig
   val compare : t -> t -> int
   val to_int : t -> int
 end
+
+module ViewMap : Map.S with type key = ViewNumber.t
+module OpMap : Map.S with type key = OpNumber.t
+module ClientMap : Map.S with type key = ClientId.t
+module ReplicaSet : Set.S with type elt = ReplicaId.t
+
+type client_entry = {
+  client_id : ClientId.t;
+  request_number : RequestNumber.t;
+  response : string option;
+}
+
+type client_map = client_entry ClientMap.t
+

@@ -9,34 +9,6 @@ type _ state =
   | ViewChange : view_change state
   | Recovering : recovering state
 
-type config = ReplicaId.t list
-
-module OpMap = Map.Make (struct
-  type t = OpNumber.t
-
-  let compare = OpNumber.compare
-end)
-
-module ClientIdMap = Map.Make (struct
-  type t = ClientId.t
-
-  let compare = ClientId.compare
-end)
-
-type client_entry = {
-  client_id : ClientId.t;
-  request_number : RequestNumber.t;
-  response : string option;
-}
-
-type client_map = client_entry ClientIdMap.t
-
-module ReplicaSet = Set.Make (struct
-  type t = ReplicaId.t
-
-  let compare = ReplicaId.compare
-end)
-
 module type OperationExecutor = sig
   type operation
   type result
@@ -48,24 +20,25 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
   type 's replica = {
     id : ReplicaId.t;
     state : 's state;
-    view : ViewNumber.t;
-    config : config;
+    view_number : ViewNumber.t;
+    config : ReplicaId.t list;
     mutable op_number : OpNumber.t;
     mutable commit_number : OpNumber.t;
     mutable request_log : Op.operation OpMap.t;
-    mutable client_map : client_map;
+    mutable client_map : Types.client_map;
     mutable prepare_ok_acks : ReplicaSet.t OpMap.t;
+    mutable start_view_change_acks : ReplicaSet.t ViewMap.t;
     network : Op.operation N.t;
   }
 
   let init_replica id config =
     let config = List.map (fun id -> ReplicaId.of_int id) config in
     let request_log = OpMap.empty in
-    let client_map = ClientIdMap.empty in
+    let client_map = ClientMap.empty in
     {
       id = ReplicaId.of_int id;
       state = Normal;
-      view = ViewNumber.init ();
+      view_number = ViewNumber.init ();
       config;
       op_number = OpNumber.init ();
       commit_number = OpNumber.init ();
@@ -73,10 +46,11 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
       client_map;
       network = N.create config;
       prepare_ok_acks = OpMap.empty;
+      start_view_change_acks = ViewMap.empty;
     }
 
   let get_primary_id replica =
-    let view_number = ViewNumber.to_int replica.view in
+    let view_number = ViewNumber.to_int replica.view_number in
     let length = List.length replica.config in
     assert (length <> 0);
     let primary_index = view_number mod length in
@@ -106,7 +80,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
       replica.request_log <-
         OpMap.add replica.op_number request.op replica.request_log;
       replica.client_map <-
-        ClientIdMap.update request.client_id
+        ClientMap.update request.client_id
           (fun _ ->
             Some
               {
@@ -119,7 +93,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
       let prepare =
         Message.Prepare
           {
-            view_number = replica.view;
+            view_number = replica.view_number;
             op_number = replica.op_number;
             commit_number = replica.commit_number;
             request;
@@ -129,7 +103,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     in
 
     let latest_request =
-      ClientIdMap.find_opt request.client_id replica.client_map
+      ClientMap.find_opt request.client_id replica.client_map
     in
     match latest_request with
     | Some latest_request ->
@@ -157,7 +131,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
         (fun _ -> Some prep.request.op)
         replica.request_log;
     replica.client_map <-
-      ClientIdMap.add prep.request.client_id
+      ClientMap.add prep.request.client_id
         {
           client_id = prep.request.client_id;
           request_number = prep.request.request_number;
@@ -168,7 +142,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     let prepare_ok =
       Message.PrepareOk
         {
-          view_number = replica.view;
+          view_number = replica.view_number;
           op_number = replica.op_number;
           replica_id = replica.id;
         }
@@ -197,7 +171,7 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     (* TODO: reply back to the user *)
     let commit =
       Message.Commit
-        { view_number = replica.view; commit_number = prep_ok.op_number }
+        { view_number = replica.view_number; commit_number = prep_ok.op_number }
     in
     N.broadcast replica.network commit;
     ()
@@ -207,6 +181,28 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     OpMap.find_opt message.commit_number replica.request_log
     |> Option.iter (fun op -> ignore @@ Op.execute op)
 
+  let handle_start_view_change (replica : normal replica)
+      (msg : Message.start_view_change) =
+    if msg.view_number > replica.view_number then (
+      let acks =
+        match
+          ViewMap.find_opt msg.view_number replica.start_view_change_acks
+        with
+        | Some acks -> acks
+        | None -> ReplicaSet.empty
+      in
+
+      let acks = ReplicaSet.add msg.replica_id acks in
+      replica.start_view_change_acks <-
+        ViewMap.add msg.view_number acks replica.start_view_change_acks;
+
+      let total_acks = ReplicaSet.cardinal acks in
+      if total_acks = quorum replica then assert false)
+
+  let handle_do_view_change (replica : normal replica)
+      (message : Op.operation Message.do_view_change) =
+    assert false
+
   let handle_normal_message (replica : normal replica)
       (message : Op.operation Message.message) =
     match message with
@@ -214,10 +210,12 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     | Prepare prep -> handle_prepare replica prep
     | PrepareOk prep_ok -> handle_prepare_ok replica prep_ok
     | Commit commit -> handle_commit replica commit
+    | StartViewChange svc -> handle_start_view_change replica svc
+    | DoViewChange dvc -> handle_do_view_change replica dvc
 
   let handle_view_change_message (replica : view_change replica)
       (message : Op.operation Message.message) =
-    assert false
+    match message with _ -> assert false
 
   let handle_recovery_message (replica : recovering replica)
       (message : Op.operation Message.message) =

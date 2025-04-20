@@ -9,20 +9,6 @@ type _ state =
   | ViewChange : view_change state
   | Recovering : recovering state
 
-type config = ReplicaId.t list
-
-module OpMap : Map.S with type key = OpNumber.t
-module ClientIdMap : Map.S with type key = ClientId.t
-module ReplicaSet : Set.S with type elt = ReplicaId.t
-
-type client_entry = {
-  client_id : ClientId.t;
-  request_number : RequestNumber.t;
-  response : string option;
-}
-
-type client_map = client_entry ClientIdMap.t
-
 module type OperationExecutor = sig
   type operation
   type result
@@ -34,13 +20,14 @@ module Make (N : Network.S) (Op : OperationExecutor) : sig
   type 's replica = {
     id : ReplicaId.t;
     state : 's state;
-    view : ViewNumber.t;
-    config : config;
+    view_number : ViewNumber.t;
+    config : ReplicaId.t list;
     mutable op_number : OpNumber.t;
     mutable commit_number : OpNumber.t;
     mutable request_log : Op.operation OpMap.t;
     mutable client_map : client_map;
     mutable prepare_ok_acks : ReplicaSet.t OpMap.t;
+    mutable start_view_change_acks : ReplicaSet.t ViewMap.t;
     network : Op.operation N.t;
   }
 

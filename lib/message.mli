@@ -21,8 +21,23 @@ type prepare_ok = {
 
 type commit = { view_number : ViewNumber.t; commit_number : OpNumber.t }
 
+type start_view_change = {
+  view_number : ViewNumber.t;
+  replica_id : ReplicaId.t;
+}
+
+type 'op do_view_change = {
+  view_number : ViewNumber.t;
+  log : 'op OpMap.t;
+  last_view_number : ViewNumber.t;
+  op_number : OpNumber.t;
+  commit_number : OpNumber.t;
+}
+
 type 'op message =
   | Request of 'op request
   | Prepare of 'op prepare
   | PrepareOk of prepare_ok
   | Commit of commit
+  | StartViewChange of start_view_change
+  | DoViewChange of 'op do_view_change

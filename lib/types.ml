@@ -38,3 +38,36 @@ module ViewNumber = struct
   let succ (ViewNumber t) = ViewNumber (succ t)
   let to_int (ViewNumber t) = t
 end
+
+module ViewMap = Map.Make (struct
+  type t = ViewNumber.t
+
+  let compare = ViewNumber.compare
+end)
+
+module OpMap = Map.Make (struct
+  type t = OpNumber.t
+
+  let compare = OpNumber.compare
+end)
+
+module ClientMap = Map.Make (struct
+  type t = ClientId.t
+
+  let compare = ClientId.compare
+end)
+
+type client_entry = {
+  client_id : ClientId.t;
+  request_number : RequestNumber.t;
+  response : string option;
+}
+
+type client_map = client_entry ClientMap.t
+
+module ReplicaSet = Set.Make (struct
+  type t = ReplicaId.t
+
+  let compare = ReplicaId.compare
+end)
+
