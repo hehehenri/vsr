@@ -44,11 +44,11 @@ module OpMap : Map.S with type key = OpNumber.t
 module ClientMap : Map.S with type key = ClientId.t
 module ReplicaSet : Set.S with type elt = ReplicaId.t
 
-type client_entry = {
+type ('op, 'result) client_entry = {
   client_id : ClientId.t;
   request_number : RequestNumber.t;
-  response : string option;
+  response : 'result option;
 }
 
-type client_map = client_entry ClientMap.t
+type ('op, 'result) client_map = ('op, 'result) client_entry ClientMap.t
 

@@ -3,54 +3,78 @@ open Types
 type config = ReplicaId.t list
 
 module type S = sig
-  type 'op t
-  type destination = Single of ReplicaId.t | Broadcast
+  type ('op, 'result) t
 
-  val create : config -> 'op t
-  val send : 'op t -> destination -> 'op Message.message -> unit
-  val broadcast : 'op t -> 'op Message.message -> unit
-  val drain_messages : 'op t -> ReplicaId.t -> 'op Message.message list
-  val has_messages : 'op t -> ReplicaId.t -> bool
-  val get_config : 'op t -> ReplicaId.t list
+  type destination =
+    | Single of ReplicaId.t
+    | Broadcast
+    | Client of ClientId.t
+
+  val create : config -> ('op, 'result) t
+
+  val send : ('op, 'result) t -> destination -> ('op, 'result) Message.message -> unit
+
+  val broadcast : ('op, 'result) t -> ('op, 'result) Message.message -> unit
+
+  val drain_messages : ('op, 'result) t -> ReplicaId.t -> ('op, 'result) Message.message list
+
+  val has_messages : ('op, 'result) t -> ReplicaId.t -> bool
+
+  val get_config : ('op, 'result) t -> ReplicaId.t list
 end
 
 module InMemory = struct
   module ReplicaMap = Map.Make (struct
     type t = ReplicaId.t
-
     let compare = ReplicaId.compare
   end)
 
-  type 'op message_queue = 'op Message.message Queue.t
+  module ClientMap = Map.Make (struct
+    type t = ClientId.t
+    let compare = ClientId.compare
+  end)
 
-  type 'op t = {
+  type ('op, 'result) message_queue = ('op, 'result) Message.message Queue.t
+
+  type ('op, 'result) t = {
     config : ReplicaId.t list;
-    mutable queues : 'op message_queue ReplicaMap.t;
+    mutable replica_queues : ('op, 'result) message_queue ReplicaMap.t;
+    mutable client_queues : ('op, 'result) message_queue ClientMap.t;
   }
 
-  type destination = Single of ReplicaId.t | Broadcast
+  type destination = Single of ReplicaId.t | Broadcast | Client of ClientId.t
 
   let create config =
-    let queues =
+    let replica_queues =
       List.fold_left
         (fun acc id ->
           let q = Queue.create () in
           ReplicaMap.add id q acc)
         ReplicaMap.empty config
     in
-    { config; queues }
+    { config; replica_queues; client_queues = ClientMap.empty }
 
   let send t dest msg =
     match dest with
     | Single id ->
-        let queue = ReplicaMap.find id t.queues in
+        let queue = ReplicaMap.find id t.replica_queues in
         Queue.add msg queue
-    | Broadcast -> ReplicaMap.iter (fun _ queue -> Queue.add msg queue) t.queues
+    | Client client_id ->
+        let queue = 
+          match ClientMap.find_opt client_id t.client_queues with
+          | Some q -> q
+          | None ->
+              let q = Queue.create () in
+              t.client_queues <- ClientMap.add client_id q t.client_queues;
+              q
+        in
+        Queue.add msg queue
+    | Broadcast -> ReplicaMap.iter (fun _ queue -> Queue.add msg queue) t.replica_queues
 
   let broadcast t msg = send t Broadcast msg
 
   let drain_messages t id =
-    let queue = ReplicaMap.find id t.queues in
+    let queue = ReplicaMap.find id t.replica_queues in
     let messages = ref [] in
     while not (Queue.is_empty queue) do
       messages := Queue.take queue :: !messages
@@ -58,7 +82,7 @@ module InMemory = struct
     List.rev !messages
 
   let has_messages t id =
-    let queue = ReplicaMap.find id t.queues in
+    let queue = ReplicaMap.find id t.replica_queues in
     not (Queue.is_empty queue)
 
   let get_config t = t.config
@@ -72,9 +96,9 @@ module ReplicaMap = Map.Make (struct
   let compare = ReplicaId.compare
 end)
 
-type 'op t = {
+type ('op, 'result) t = {
   config : config;
-  messages : 'op Message.message list ReplicaMap.t;
+  messages : ('op, 'result) Message.message list ReplicaMap.t;
 }
 
 let create config = { config; messages = ReplicaMap.empty }

@@ -57,13 +57,13 @@ module ClientMap = Map.Make (struct
   let compare = ClientId.compare
 end)
 
-type client_entry = {
+type ('op, 'result) client_entry = {
   client_id : ClientId.t;
   request_number : RequestNumber.t;
-  response : string option;
+  response : 'result option;
 }
 
-type client_map = client_entry ClientMap.t
+type ('op, 'result) client_map = ('op, 'result) client_entry ClientMap.t
 
 module ReplicaSet = Set.Make (struct
   type t = ReplicaId.t

@@ -1,5 +1,11 @@
 open Types
 
+type ('op, 'result) response = {
+  client_id : ClientId.t;
+  request_number : RequestNumber.t;
+  result : 'result;
+}
+
 type 'op request = {
   client_id : ClientId.t;
   request_number : RequestNumber.t;
@@ -28,7 +34,7 @@ type start_view_change = {
 
 type 'op do_view_change = {
   view_number : ViewNumber.t;
-  log : 'op OpMap.t;
+  log : 'op request OpMap.t;
   last_view_number : ViewNumber.t;
   op_number : OpNumber.t;
   commit_number : OpNumber.t;
@@ -40,7 +46,7 @@ type recovery = {
 }
 
 type 'op recovery_response_data = {
-  log: 'op OpMap.t;
+  log: 'op request OpMap.t;
   op_number: OpNumber.t;
   commit_number: OpNumber.t;
 }
@@ -55,7 +61,6 @@ type 'op recovery_response = {
   ];
 }
 
-
 type get_state = {
   view_number : ViewNumber.t;
   op_number : OpNumber.t;
@@ -64,13 +69,12 @@ type get_state = {
 
 type 'op new_state = {
   view_number : ViewNumber.t;
-  log : 'op OpMap.t;
+  log : 'op request OpMap.t;
   op_number : OpNumber.t;
   commit_number : OpNumber.t;
 }
 
-type 'op message =
-  | Request of 'op request
+type 'op replica_message =
   | Prepare of 'op prepare
   | PrepareOk of prepare_ok
   | Commit of commit
@@ -80,3 +84,11 @@ type 'op message =
   | RecoveryResponse of 'op recovery_response
   | GetState of get_state
   | NewState of 'op new_state
+
+type ('op, 'result) client_message =
+  | Request of 'op request
+  | Response of ('op, 'result) response
+
+type ('op, 'result) message =
+  | ReplicaMessage of 'op replica_message
+  | ClientMessage of ('op, 'result) client_message
