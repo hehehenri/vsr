@@ -1,4 +1,5 @@
 (library
  (name lib)
  (public_name vsr.lib)
+ (libraries unix)
  (modules replica types message network))

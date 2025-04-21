@@ -9,9 +9,9 @@ end
 module ReplicaId : sig
   type t = ReplicaId of int
 
-  val to_int : t -> int
   val of_int : int -> t
   val compare : t -> t -> int
+  val succ : t -> t
 end
 
 module OpNumber : sig

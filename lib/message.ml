@@ -34,6 +34,27 @@ type 'op do_view_change = {
   commit_number : OpNumber.t;
 }
 
+type recovery = {
+  replica_id: ReplicaId.t;
+  nonce: int;
+}
+
+type 'op recovery_response_data = {
+  log: 'op OpMap.t;
+  op_number: OpNumber.t;
+  commit_number: OpNumber.t;
+}
+
+type 'op recovery_response = {
+  replica_id: ReplicaId.t;
+  view_number: ViewNumber.t;
+  nonce: int;
+  response_type: [ 
+    | `Primary of 'op recovery_response_data
+    | `NonPrimary
+  ];
+}
+
 type 'op message =
   | Request of 'op request
   | Prepare of 'op prepare
@@ -41,3 +62,5 @@ type 'op message =
   | Commit of commit
   | StartViewChange of start_view_change
   | DoViewChange of 'op do_view_change
+  | Recovery of recovery
+  | RecoveryResponse of 'op recovery_response

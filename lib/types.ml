@@ -9,9 +9,9 @@ end
 module ReplicaId = struct
   type t = ReplicaId of int
 
-  let to_int (ReplicaId t) = t
   let of_int i = ReplicaId i
   let compare (ReplicaId a) (ReplicaId b) = compare a b
+  let succ (ReplicaId t) = ReplicaId (t + 1)
 end
 
 module OpNumber = struct

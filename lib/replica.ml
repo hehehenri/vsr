@@ -19,15 +19,18 @@ end
 module Make (N : Network.S) (Op : OperationExecutor) = struct
   type 's replica = {
     id : ReplicaId.t;
-    state : 's state;
-    view_number : ViewNumber.t;
     config : ReplicaId.t list;
+    mutable state : 's state;
+    mutable view_number : ViewNumber.t;
     mutable op_number : OpNumber.t;
     mutable commit_number : OpNumber.t;
     mutable request_log : Op.operation OpMap.t;
     mutable client_map : Types.client_map;
     mutable prepare_ok_acks : ReplicaSet.t OpMap.t;
     mutable start_view_change_acks : ReplicaSet.t ViewMap.t;
+    mutable do_view_change_acks : ReplicaSet.t ViewMap.t;
+    mutable recovery_nonce : int option;
+    mutable recovery_responses : ReplicaSet.t ViewMap.t;
     network : Op.operation N.t;
   }
 
@@ -47,6 +50,9 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
       network = N.create config;
       prepare_ok_acks = OpMap.empty;
       start_view_change_acks = ViewMap.empty;
+      do_view_change_acks = ViewMap.empty;
+      recovery_nonce = None;
+      recovery_responses = ViewMap.empty;
     }
 
   let get_primary_id replica =
@@ -59,6 +65,10 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
   let is_primary replica =
     let primary_id = get_primary_id replica in
     primary_id = replica.id
+
+  let next_primary replica =
+    let current_primary = get_primary_id replica in
+    ReplicaId.succ current_primary
 
   let is_backup replica = not @@ is_primary replica
 
@@ -197,14 +207,90 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
         ViewMap.add msg.view_number acks replica.start_view_change_acks;
 
       let total_acks = ReplicaSet.cardinal acks in
-      if total_acks = quorum replica then assert false)
+      if total_acks = quorum replica then
+        let next_primary = next_primary replica in
+        let do_view_change =
+          Message.DoViewChange
+            {
+              view_number = ViewNumber.succ replica.view_number;
+              log = replica.request_log;
+              last_view_number = replica.view_number;
+              op_number = replica.op_number;
+              commit_number = replica.commit_number;
+            }
+        in
+        N.send replica.network (Single next_primary) do_view_change)
 
   let handle_do_view_change (replica : normal replica)
       (message : Op.operation Message.do_view_change) =
+    assert (is_primary replica);
     assert false
 
-  let handle_normal_message (replica : normal replica)
-      (message : Op.operation Message.message) =
+
+  let handle_recovery (replica : normal replica) (msg : Message.recovery) =
+    let response = 
+      Message.RecoveryResponse {
+        replica_id = replica.id;
+        view_number = replica.view_number;
+        nonce = msg.nonce;
+        log = if is_primary replica then Some replica.request_log else None;
+        op_number = if is_primary replica then Some replica.op_number else None;
+        commit_number = if is_primary replica then Some replica.commit_number else None;
+      }
+    in
+    N.send replica.network (Single msg.replica_id) response
+
+  let start_recovery (replica : recovering replica) =
+    let nonce = int_of_float (Unix.time()) in
+    let recovery_msg = Message.Recovery {
+      replica_id = replica.id;
+      nonce = nonce;
+    } in
+    replica.recovery_nonce <- Some nonce;
+    replica.recovery_responses <- ViewMap.empty;
+    N.broadcast replica.network recovery_msg
+
+  let handle_recovery_response (replica : recovering replica) (msg : Op.operation Message.recovery_response) =
+    match replica.recovery_nonce with
+    | None -> ()
+    | Some nonce when nonce <> msg.nonce -> ()
+    | Some _ ->
+        let responses = match ViewMap.find_opt msg.view_number replica.recovery_responses with
+          | None -> ReplicaSet.empty
+          | Some s -> s
+        in
+        let responses = ReplicaSet.add msg.replica_id responses in
+        replica.recovery_responses <- ViewMap.add msg.view_number responses replica.recovery_responses;
+        
+        let latest_view = ViewMap.max_binding_opt replica.recovery_responses
+          |> Option.map fst
+          |> Option.value ~default:replica.view_number
+        in
+        let responses_for_view = ViewMap.find_opt latest_view replica.recovery_responses
+          |> Option.value ~default:ReplicaSet.empty
+        in
+        if ReplicaSet.cardinal responses_for_view >= quorum replica then begin
+          let primary_id = get_primary_id { replica with view_number = latest_view } in
+          (match msg.response_type with
+          | `Primary data ->
+            assert (primary_id = msg.replica_id);
+            replica.view_number <- msg.view_number;
+            replica.op_number <- data.op_number;
+            replica.commit_number <- data.commit_number;
+            replica.request_log <- data.log;
+            replica.state <- Normal;
+            replica.recovery_nonce <- None;
+            replica.recovery_responses <- ViewMap.empty;
+            ()
+          | `NonPrimary -> ())
+        end
+
+  let handle_recovery_message (replica : recovering replica) (message : 'op Message.message) =
+    match message with
+    | RecoveryResponse resp -> handle_recovery_response replica resp
+    | _ -> ()
+
+  let handle_normal_message (replica : normal replica) (message : 'op Message.message) =
     match message with
     | Request req -> handle_request replica req
     | Prepare prep -> handle_prepare replica prep
@@ -212,17 +298,14 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     | Commit commit -> handle_commit replica commit
     | StartViewChange svc -> handle_start_view_change replica svc
     | DoViewChange dvc -> handle_do_view_change replica dvc
+    | Recovery recovery -> handle_recovery replica recovery
+    | _ -> ()
 
   let handle_view_change_message (replica : view_change replica)
       (message : Op.operation Message.message) =
     match message with _ -> assert false
 
-  let handle_recovery_message (replica : recovering replica)
-      (message : Op.operation Message.message) =
-    assert false
-
-  let handle_message : type s. s replica -> Op.operation Message.message -> unit
-      =
+  let handle_message : type s. s replica -> Op.operation Message.message -> unit =
    fun replica message ->
     match replica.state with
     | Normal -> handle_normal_message replica message
