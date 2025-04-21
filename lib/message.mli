@@ -39,13 +39,34 @@ type recovery = {
   nonce: int;
 }
 
+type 'op recovery_response_data = {
+  log: 'op OpMap.t;
+  op_number: OpNumber.t;
+  commit_number: OpNumber.t;
+}
+
 type 'op recovery_response = {
   replica_id: ReplicaId.t;
   view_number: ViewNumber.t;
   nonce: int;
-  log: 'op OpMap.t Option.t;
-  op_number: OpNumber.t Option.t;
-  commit_number: OpNumber.t Option.t;
+  response_type: [ 
+    | `Primary of 'op recovery_response_data
+    | `NonPrimary
+  ];
+}
+
+
+type get_state = {
+  view_number : ViewNumber.t;
+  op_number : OpNumber.t;
+  replica_id : ReplicaId.t;
+}
+
+type 'op new_state = {
+  view_number : ViewNumber.t;
+  log : 'op OpMap.t;
+  op_number : OpNumber.t;
+  commit_number : OpNumber.t;
 }
 
 type 'op message =
@@ -57,3 +78,5 @@ type 'op message =
   | DoViewChange of 'op do_view_change
   | Recovery of recovery
   | RecoveryResponse of 'op recovery_response
+  | GetState of get_state
+  | NewState of 'op new_state

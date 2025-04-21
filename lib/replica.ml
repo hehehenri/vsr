@@ -126,39 +126,88 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
         else continue ()
     | None -> continue ()
 
-  let handle_prepare replica
-      (prep : Op.operation Message.prepare) =
+  let request_state_transfer replica =
+    assert (is_normal replica);
+    let get_state = {
+      Message.view_number = replica.view_number;
+      op_number = replica.op_number;
+      replica_id = replica.id;
+    } in
+    N.broadcast replica.network (Message.GetState get_state)
+
+  let handle_get_state replica (msg : Message.get_state) =
+    if is_normal replica && msg.view_number = replica.view_number then
+      let new_state = Message.NewState {
+        view_number = replica.view_number;
+        log = OpMap.filter 
+          (fun op_num _ -> OpNumber.compare op_num msg.op_number > 0) 
+          replica.request_log;
+        op_number = replica.op_number;
+        commit_number = replica.commit_number;
+      } in
+      N.send replica.network (Single msg.replica_id) new_state
+
+  let handle_new_state replica (msg : Op.operation Message.new_state) =
+    if msg.view_number = replica.view_number then begin
+      OpMap.iter (fun op_num op ->
+        if not (OpMap.mem op_num replica.request_log) then
+          replica.request_log <- OpMap.add op_num op replica.request_log
+      ) msg.log;
+      
+      if OpNumber.compare msg.op_number replica.op_number > 0 then
+        replica.op_number <- msg.op_number;
+      
+      if OpNumber.compare msg.commit_number replica.commit_number > 0 then begin
+        let rec execute_ops op_n =
+          if OpNumber.compare op_n msg.commit_number <= 0 then begin
+            match OpMap.find_opt op_n replica.request_log with
+            | Some _ -> 
+                ignore @@ commit replica op_n;
+                execute_ops (OpNumber.succ op_n)
+            | None -> ()
+          end
+        in
+        execute_ops (OpNumber.succ replica.commit_number);
+        replica.commit_number <- msg.commit_number
+      end
+    end
+
+  let handle_prepare replica (prep : Op.operation Message.prepare) =
     assert (is_backup replica);
     assert (is_normal replica);
-    let is_up_to_date = prep.op_number < OpNumber.succ replica.op_number in
+    let is_up_to_date = OpNumber.compare prep.op_number (OpNumber.succ replica.op_number) <= 0 in
 
-    if not is_up_to_date then (* TODO: state transfer *)
-      assert false
-    else assert (OpNumber.succ replica.op_number = prep.op_number);
-    replica.op_number <- prep.op_number;
-    replica.request_log <-
-      OpMap.update prep.op_number
-        (fun _ -> Some prep.request.op)
-        replica.request_log;
-    replica.client_map <-
-      ClientMap.add prep.request.client_id
-        {
-          client_id = prep.request.client_id;
-          request_number = prep.request.request_number;
-          response = None;
-        }
-        replica.client_map;
+    if not is_up_to_date then begin
+      request_state_transfer replica;
+      (* this will be processed whenever we caught up with state transfer *)
+      ()
+    end else begin
+      assert (OpNumber.compare (OpNumber.succ replica.op_number) prep.op_number = 0);
+      replica.op_number <- prep.op_number;
+      replica.request_log <-
+        OpMap.update prep.op_number
+          (fun _ -> Some prep.request.op)
+          replica.request_log;
+      replica.client_map <-
+        ClientMap.add prep.request.client_id
+          {
+            client_id = prep.request.client_id;
+            request_number = prep.request.request_number;
+            response = None;
+          }
+          replica.client_map;
 
-    let prepare_ok =
-      Message.PrepareOk
-        {
-          view_number = replica.view_number;
-          op_number = replica.op_number;
-          replica_id = replica.id;
-        }
-    in
-    let primary_id = get_primary_id replica in
-    N.send replica.network (Single primary_id) prepare_ok
+      let prepare_ok =
+        Message.PrepareOk
+          {
+            view_number = replica.view_number;
+            op_number = replica.op_number;
+            replica_id = replica.id;
+          }
+      in
+      let primary_id = get_primary_id replica in
+      N.send replica.network (Single primary_id) prepare_ok
+    end
 
   let handle_prepare_ok replica
       (prep_ok : Message.prepare_ok) =
@@ -236,9 +285,13 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
         replica_id = replica.id;
         view_number = replica.view_number;
         nonce = msg.nonce;
-        log = if is_primary replica then Some replica.request_log else None;
-        op_number = if is_primary replica then Some replica.op_number else None;
-        commit_number = if is_primary replica then Some replica.commit_number else None;
+        response_type = if is_primary replica then
+          `Primary {
+            log = replica.request_log;
+            op_number = replica.op_number;
+            commit_number = replica.commit_number;
+          }
+        else `NonPrimary
       }
     in
     N.send replica.network (Single msg.replica_id) response
@@ -276,17 +329,18 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
         in
         if ReplicaSet.cardinal responses_for_view >= quorum replica then begin
           let primary_id = get_primary_id { replica with view_number = latest_view } in
-          match msg.log, msg.op_number, msg.commit_number with
-          | Some log, Some op_number, Some commit_number when msg.replica_id = primary_id ->
+          match msg.response_type with
+          | `Primary data ->
+            if msg.replica_id = primary_id then
             replica.view_number <- msg.view_number;
-            replica.op_number <- op_number;
-            replica.commit_number <- commit_number;
-            replica.request_log <- log;
+            replica.op_number <- data.op_number;
+            replica.commit_number <- data.commit_number;
+            replica.request_log <- data.log;
             replica.state <- Normal;
             replica.recovery_nonce <- None;
             replica.recovery_responses <- ViewMap.empty;
             ()
-          | _ -> ()
+          | `NonPrimary -> ()
         end
 
   let handle_message replica (message : Op.operation Message.message) =
@@ -300,19 +354,20 @@ module Make (N : Network.S) (Op : OperationExecutor) = struct
     | Normal, DoViewChange dvc -> handle_do_view_change replica dvc
     | Normal, Recovery recovery -> handle_recovery replica recovery
     | Normal, RecoveryResponse _ -> () (* Ignore recovery responses in normal state *)
+    | Normal, GetState get_state -> handle_get_state replica get_state
+    | Normal, NewState new_state -> handle_new_state replica new_state
     
     (* View Change state handling *)
     | ViewChange, StartViewChange svc -> handle_start_view_change replica svc
     | ViewChange, DoViewChange dvc -> handle_do_view_change replica dvc
     | ViewChange, Recovery recovery -> handle_recovery replica recovery
     | ViewChange, RecoveryResponse _ -> () (* Ignore recovery responses in view change *)
-    | ViewChange, (Request _ | Prepare _ | PrepareOk _ | Commit _) -> 
+    | ViewChange, (Request _ | Prepare _ | PrepareOk _ | Commit _ | GetState _ | NewState _) -> 
         () (* Ignore normal operation messages during view change *)
     
     (* Recovery state handling *)
     | Recovering, Recovery recovery -> handle_recovery replica recovery
     | Recovering, RecoveryResponse resp -> handle_recovery_response replica resp
-    | Recovering, (Request _ | Prepare _ | PrepareOk _ | Commit _ | StartViewChange _ | DoViewChange _) ->
+    | Recovering, (Request _ | Prepare _ | PrepareOk _ | Commit _ | StartViewChange _ | DoViewChange _ | GetState _ | NewState _) ->
         () (* Ignore all other messages during recovery *)
-
 end
